@@ -179,6 +179,74 @@ func (f *File) Open() (rc io.ReadCloser, err error) {
 	return
 }
 
+// VerifyPassword checks if the password for the file is correct without decryption of the whole file.
+func (f *File) VerifyPassword(password string) error {
+	if !f.IsEncrypted() {
+		return nil // Not encrypted, so password is not needed.
+	}
+	// This is not a part of the spec, but is used by WinZip.
+	if f.ae > 0 {
+		return f.verifyAESPassword(password)
+	}
+	return f.verifyStandardPassword(password)
+}
+
+func (f *File) verifyAESPassword(password string) error {
+	bodyOffset, err := f.findBodyOffset()
+	if err != nil {
+		return err
+	}
+
+	keyLen := AESKeyLen(f.aesStrength)
+	if keyLen == 0 {
+		return ErrDecryption
+	}
+	saltLen := keyLen / 2
+
+	saltpwvv := make([]byte, saltLen+2)
+	if _, err := f.zipr.ReadAt(saltpwvv, f.headerOffset+bodyOffset); err != nil {
+		return err
+	}
+	salt := saltpwvv[:saltLen]
+	pwvv := saltpwvv[saltLen:]
+
+	_, _, pwv := GenerateKeys([]byte(password), salt, keyLen)
+	if !CheckPasswordVerification(pwv, pwvv) {
+		return ErrPassword
+	}
+	return nil
+}
+
+func (f *File) verifyStandardPassword(password string) error {
+	bodyOffset, err := f.findBodyOffset()
+	if err != nil {
+		return err
+	}
+
+	header := make([]byte, 12)
+	if _, err := f.zipr.ReadAt(header, f.headerOffset+bodyOffset); err != nil {
+		return err
+	}
+
+	crypto := NewZipCrypto([]byte(password))
+	decryptedHeader := crypto.Decrypt(header)
+
+	var check byte
+	if f.hasDataDescriptor() {
+		// Data descriptor is present, check byte is high byte of mod time.
+		check = byte(f.ModifiedTime >> 8)
+	} else {
+		// No data descriptor, check byte is high byte of CRC-32.
+		check = byte(f.CRC32 >> 24)
+	}
+
+	if decryptedHeader[11] != check {
+		return ErrPassword
+	}
+
+	return nil
+}
+
 type checksumReader struct {
 	rc    io.ReadCloser
 	hash  hash.Hash32

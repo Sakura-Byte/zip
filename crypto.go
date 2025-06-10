@@ -33,7 +33,7 @@ const (
 	aes256 = 32
 )
 
-func aesKeyLen(strength byte) int {
+func AESKeyLen(strength byte) int {
 	switch strength {
 	case 1:
 		return aes128
@@ -267,12 +267,12 @@ func (a *authReader) checkAuthentication(authcode []byte) bool {
 	return a.auth
 }
 
-func checkPasswordVerification(pwvv, pwv []byte) bool {
+func CheckPasswordVerification(pwvv, pwv []byte) bool {
 	b := subtle.ConstantTimeCompare(pwvv, pwv) > 0
 	return b
 }
 
-func generateKeys(password, salt []byte, keySize int) (encKey, authKey, pwv []byte) {
+func GenerateKeys(password, salt []byte, keySize int) (encKey, authKey, pwv []byte) {
 	totalSize := (keySize * 2) + 2 // enc + auth + pv sizes
 	key := pbkdf2.Key(password, salt, 1000, totalSize, sha1.New)
 	encKey = key[:keySize]
@@ -283,7 +283,7 @@ func generateKeys(password, salt []byte, keySize int) (encKey, authKey, pwv []by
 
 // newDecryptionReader returns an authenticated, decryption reader
 func newDecryptionReader(r *io.SectionReader, f *File) (io.Reader, error) {
-	keyLen := aesKeyLen(f.aesStrength)
+	keyLen := AESKeyLen(f.aesStrength)
 	saltLen := keyLen / 2 // salt is half of key len
 	if saltLen == 0 {
 		return nil, ErrDecryption
@@ -299,8 +299,8 @@ func newDecryptionReader(r *io.SectionReader, f *File) (io.Reader, error) {
 	if f.password == nil {
 		return nil, ErrPassword
 	}
-	decKey, authKey, pwv := generateKeys(f.password(), salt, keyLen)
-	if !checkPasswordVerification(pwv, pwvv) {
+	decKey, authKey, pwv := GenerateKeys(f.password(), salt, keyLen)
+	if !CheckPasswordVerification(pwv, pwvv) {
 		return nil, ErrPassword
 	}
 	dataOff := int64(saltLen + 2)
@@ -387,13 +387,13 @@ func encryptStream(key []byte, w io.Writer) (io.Writer, error) {
 // out the salt, 2. writes out pwv, and 3. writes out authenticated, encrypted
 // data. The authcode will be written out in fileWriter.close().
 func newEncryptionWriter(w io.Writer, password passwordFn, fw *fileWriter, aesstrength byte) (io.Writer, error) {
-	keysize := aesKeyLen(aesstrength)
+	keysize := AESKeyLen(aesstrength)
 	salt := make([]byte, keysize/2)
 	_, err := rand.Read(salt[:])
 	if err != nil {
 		return nil, errors.New("zip: unable to generate random salt")
 	}
-	ekey, akey, pwv := generateKeys(password(), salt[:], keysize)
+	ekey, akey, pwv := GenerateKeys(password(), salt[:], keysize)
 	fw.hmac = hmac.New(sha1.New, akey)
 	aw := &authWriter{
 		hmac: fw.hmac,
