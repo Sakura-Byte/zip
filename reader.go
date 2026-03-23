@@ -22,9 +22,10 @@ var (
 )
 
 type Reader struct {
-	r       io.ReaderAt
-	File    []*File
-	Comment string
+	r          io.ReaderAt
+	File       []*File
+	Comment    string
+	baseOffset int64
 }
 
 type ReadCloser struct {
@@ -74,7 +75,7 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 }
 
 func (z *Reader) init(r io.ReaderAt, size int64) error {
-	end, err := readDirectoryEnd(r, size)
+	end, baseOffset, err := readDirectoryEnd(r, size)
 	if err != nil {
 		return err
 	}
@@ -82,10 +83,11 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 		return fmt.Errorf("archive/zip: TOC declares impossible %d files in %d byte zip", end.directoryRecords, size)
 	}
 	z.r = r
+	z.baseOffset = baseOffset
 	z.File = make([]*File, 0, end.directoryRecords)
 	z.Comment = end.comment
 	rs := io.NewSectionReader(r, 0, size)
-	if _, err = rs.Seek(int64(end.directoryOffset), os.SEEK_SET); err != nil {
+	if _, err = rs.Seek(z.baseOffset+int64(end.directoryOffset), os.SEEK_SET); err != nil {
 		return err
 	}
 	buf := bufio.NewReader(rs)
@@ -103,6 +105,7 @@ func (z *Reader) init(r io.ReaderAt, size int64) error {
 		if err != nil {
 			return err
 		}
+		f.headerOffset += z.baseOffset
 		z.File = append(z.File, f)
 	}
 	if uint16(len(z.File)) != uint16(end.directoryRecords) { // only compare 16 bits here
@@ -455,7 +458,7 @@ func readDataDescriptor(r io.Reader, f *File) error {
 	return nil
 }
 
-func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, err error) {
+func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, baseOffset int64, err error) {
 	// look for directoryEndSignature in the last 1k, then in the last 65k
 	var buf []byte
 	var directoryEndOffset int64
@@ -465,7 +468,7 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, err error) 
 		}
 		buf = make([]byte, int(bLen))
 		if _, err := r.ReadAt(buf, size-bLen); err != nil && err != io.EOF {
-			return nil, err
+			return nil, 0, err
 		}
 		if p := findSignatureInBlock(buf); p >= 0 {
 			buf = buf[p:]
@@ -473,7 +476,7 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, err error) 
 			break
 		}
 		if i == 1 || bLen == size {
-			return nil, ErrFormat
+			return nil, 0, ErrFormat
 		}
 	}
 
@@ -490,23 +493,59 @@ func readDirectoryEnd(r io.ReaderAt, size int64) (dir *directoryEnd, err error) 
 	}
 	l := int(d.commentLen)
 	if l > len(b) {
-		return nil, errors.New("zip: invalid comment length")
+		return nil, 0, errors.New("zip: invalid comment length")
 	}
 	d.comment = string(b[:l])
 
-	p, err := findDirectory64End(r, directoryEndOffset)
-	if err == nil && p >= 0 {
-		err = readDirectory64End(r, p, d)
-	}
-	if err != nil {
-		return nil, err
+	if d.directoryRecords == 0xffff || d.directorySize == 0xffff || d.directoryOffset == 0xffffffff {
+		p, err := findDirectory64End(r, directoryEndOffset)
+		if err == nil && p >= 0 {
+			directoryEndOffset = p
+			err = readDirectory64End(r, p, d)
+		}
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
-	// Make sure directoryOffset points to somewhere in our file.
-	if o := int64(d.directoryOffset); o < 0 || o >= size {
-		return nil, ErrFormat
+	maxInt64 := uint64(1<<63 - 1)
+	if d.directorySize > maxInt64 || d.directoryOffset > maxInt64 {
+		return nil, 0, ErrFormat
 	}
-	return d, nil
+
+	baseOffset = directoryEndOffset - int64(d.directorySize) - int64(d.directoryOffset)
+	if baseOffset > 0 {
+		baseOffset = 0
+	}
+
+	if baseOffset != 0 {
+		if d.directoryRecords == 0 {
+			baseOffset = 0
+		} else {
+			off := baseOffset + int64(d.directoryOffset)
+			if off < 0 || off >= size {
+				baseOffset = 0
+			} else {
+				rs := io.NewSectionReader(r, off, size-off)
+				if readDirectoryHeader(&File{}, rs) != nil {
+					baseOffset = 0
+				}
+			}
+		}
+	}
+
+	seekOffset := int64(d.directoryOffset)
+	if baseOffset != 0 {
+		seekOffset = baseOffset + int64(d.directoryOffset)
+	}
+
+	// Make sure the selected central directory offset points somewhere
+	// inside the file.
+	if seekOffset < 0 || seekOffset >= size {
+		return nil, 0, ErrFormat
+	}
+
+	return d, baseOffset, nil
 }
 
 // findDirectory64End tries to read the zip64 locator just before the
@@ -525,8 +564,13 @@ func findDirectory64End(r io.ReaderAt, directoryEndOffset int64) (int64, error) 
 	if sig := b.uint32(); sig != directory64LocSignature {
 		return -1, nil
 	}
-	b = b[4:]       // skip number of the disk with the start of the zip64 end of central directory
-	p := b.uint64() // relative offset of the zip64 end of central directory record
+	if b.uint32() != 0 {
+		return -1, nil
+	}
+	p := b.uint64()
+	if b.uint32() != 1 {
+		return -1, nil
+	}
 	return int64(p), nil
 }
 
@@ -560,9 +604,10 @@ func findSignatureInBlock(b []byte) int {
 		if b[i] == 'P' && b[i+1] == 'K' && b[i+2] == 0x05 && b[i+3] == 0x06 {
 			// n is length of comment
 			n := int(b[i+directoryEndLen-2]) | int(b[i+directoryEndLen-1])<<8
-			if n+directoryEndLen+i <= len(b) {
-				return i
+			if n+directoryEndLen+i > len(b) {
+				return -1
 			}
+			return i
 		}
 	}
 	return -1

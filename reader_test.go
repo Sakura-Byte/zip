@@ -605,3 +605,49 @@ func TestIssue11146(t *testing.T) {
 	}
 	r.Close()
 }
+
+func TestReaderHandlesStrippedPrefixByUsingNegativeBaseOffset(t *testing.T) {
+	buf := new(bytes.Buffer)
+	prefix := []byte("PK00")
+	n, err := buf.Write(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewWriter(buf)
+	w.SetOffset(int64(n))
+
+	payload := []byte("offset-aware zip")
+	file, err := w.Create("hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	trimmed := buf.Bytes()[n:]
+	zr, err := NewReader(bytes.NewReader(trimmed), int64(len(trimmed)))
+	if err != nil {
+		t.Fatalf("NewReader() error = %v", err)
+	}
+	if len(zr.File) != 1 || zr.File[0].Name != "hello.txt" {
+		t.Fatalf("unexpected file list: %+v", zr.File)
+	}
+
+	rc, err := zr.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	content, err := ioutil.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(content, payload) {
+		t.Fatalf("unexpected content: got %q want %q", string(content), string(payload))
+	}
+}
