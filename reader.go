@@ -340,7 +340,8 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 	commentLen := int(b.uint16())
 	b = b[4:] // skipped start disk number and internal attributes (2x uint16)
 	f.ExternalAttrs = b.uint32()
-	f.headerOffset = int64(b.uint32())
+	rawHeaderOffset := b.uint32()
+	f.headerOffset = int64(rawHeaderOffset)
 	d := make([]byte, filenameLen+extraLen+commentLen)
 	if _, err := io.ReadFull(r, d); err != nil {
 		return err
@@ -360,14 +361,24 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 			eb := readBuf(b[:size])
 			switch tag {
 			case zip64ExtraId:
-				// update directory values from the zip64 extra block
-				if len(eb) >= 8 {
+				// ZIP64 extra fields only appear for the 32-bit header fields
+				// that overflowed and were set to 0xffffffff in the directory entry.
+				if f.UncompressedSize == uint32max {
+					if len(eb) < 8 {
+						return ErrFormat
+					}
 					f.UncompressedSize64 = eb.uint64()
 				}
-				if len(eb) >= 8 {
+				if f.CompressedSize == uint32max {
+					if len(eb) < 8 {
+						return ErrFormat
+					}
 					f.CompressedSize64 = eb.uint64()
 				}
-				if len(eb) >= 8 {
+				if rawHeaderOffset == uint32max {
+					if len(eb) < 8 {
+						return ErrFormat
+					}
 					f.headerOffset = int64(eb.uint64())
 				}
 			case winzipAesExtraId:
