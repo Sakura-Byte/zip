@@ -168,7 +168,14 @@ func (f *File) Open() (rc io.ReadCloser, err error) {
 	}
 	var desr io.Reader
 	if f.hasDataDescriptor() {
-		desr = io.NewSectionReader(f.zipr, f.headerOffset+bodyOffset+size, dataDescriptorLen)
+		// For traditional ZipCrypto archives, some tools encrypt the trailing
+		// data descriptor as part of the ciphertext stream. In that case the
+		// central directory CRC is still trustworthy, but reading the descriptor
+		// as plaintext yields a false checksum failure. Fall back to validating
+		// against the central directory CRC only.
+		if !(f.IsEncrypted() && f.ae == 0) {
+			desr = io.NewSectionReader(f.zipr, f.headerOffset+bodyOffset+size, dataDescriptorLen)
+		}
 	}
 	rc = &checksumReader{
 		rc:   rc,
@@ -346,9 +353,11 @@ func readDirectoryHeader(f *File, r io.Reader) error {
 	if _, err := io.ReadFull(r, d); err != nil {
 		return err
 	}
-	f.Name = string(d[:filenameLen])
+	rawName := d[:filenameLen]
 	f.Extra = d[filenameLen : filenameLen+extraLen]
-	f.Comment = string(d[filenameLen+extraLen:])
+	rawComment := d[filenameLen+extraLen:]
+	f.Name, f.NameEncoding = decodeName(rawName, f.Flags)
+	f.Comment, f.CommentEncoding = decodeCommentWithPreferred(rawComment, f.Flags, f.NameEncoding)
 
 	if len(f.Extra) > 0 {
 		b := readBuf(f.Extra)

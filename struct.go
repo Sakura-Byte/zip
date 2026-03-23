@@ -92,6 +92,8 @@ type FileHeader struct {
 	Extra              []byte
 	ExternalAttrs      uint32 // Meaning depends on CreatorVersion
 	Comment            string
+	NameEncoding       string
+	CommentEncoding    string
 
 	// DeferAuth being set to true will delay hmac auth/integrity
 	// checks when decrypting a file meaning the reader will be
